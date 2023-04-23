@@ -14,7 +14,7 @@ void Victor::init()
 
 void Victor::setPower(float power)
 {
-  power *= (Victor::SERVO_MAX_US - Victor::SERVO_MIN_US) / 100 / 2;
+  power *= (Victor::SERVO_MAX_US - Victor::SERVO_MIN_US) / 2;
   power += Victor::SERVO_MID_US;
   servo.writeMicroseconds(int(power));
 }
