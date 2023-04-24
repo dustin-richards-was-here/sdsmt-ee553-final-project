@@ -5,18 +5,27 @@
 #include "PID_v2.h"
 #include "Wire.h"
 
+//#define DEBUG
+
 // pin definitions
-constexpr int joystickXPin = A1;
-constexpr int endstopPin = 14;
+constexpr int joystickXPin = A2;
+constexpr int joystickYPin = A1;
+constexpr int endstopPin = A0;
 constexpr int loadCellDoutPin = 2;
 constexpr int loadCellSckPin = 3;
-constexpr int travelEncoderPowerPin = A0;
+constexpr int encoderPowerPin = 10;
+constexpr int travelMotorPin = 11;
+constexpr int liftMotorPin = 12;
+constexpr int loadAnglePotPin = A3;
 
 // device objects
-Victor victor(53);
+Victor travelMotor(travelMotorPin);
+Victor liftMotor(liftMotorPin);
 HX711 loadCell;
-TwoWire *travelEncoderI2C = &Wire1;
+TwoWire *travelEncoderI2C = &Wire;
+TwoWire *liftEncoderI2C = &Wire1;
 AS5600 travelEncoder(travelEncoderI2C);
+AS5600 liftEncoder(liftEncoderI2C);
 
 // load cell calibration
 // number acquired from get_units(50) with a 7lb load + a belt: 205674.00
@@ -35,8 +44,13 @@ constexpr float TRAVEL_VELOCITY_MAX_DPS = TRAVEL_VELOCITY_MAX_HZ * HZ_TO_DPS;
 constexpr int PID_OUTPUT_LIMIT = 1023;
 
 // filtering for encoder velocity esimation
-constexpr int velocityFilterCutoffFreq = 5; // Hz, I think
+constexpr int velocityFilterCutoffFreq = 100; // Hz, I think
 FilterOnePole travelVelocityFilter(LOWPASS, velocityFilterCutoffFreq);
+
+// filtering for joystick inputs
+constexpr int joystickFilterCutoffFreq = 10;
+FilterOnePole joystickXFilter(LOWPASS, joystickFilterCutoffFreq);
+FilterOnePole joystickYFilter(LOWPASS, joystickFilterCutoffFreq);
 
 // PID setup
 //double KpTravelVelocity = 0.00005;
@@ -46,39 +60,47 @@ double KdTravelVelocity = 0;
 PID_v2 travelVelocityPID(KpTravelVelocity, KiTravelVelocity, KdTravelVelocity, PID::Direct);
 
 void setup() {
+  travelMotor.init();
+  liftMotor.init();
+
   Serial.begin(115200);
 
-  victor.init();
-
   // load cell setup
-  // loadCell.begin(loadCellDoutPin, loadCellSckPin);
-  // loadCell.set_scale(loadcellScale);
-  // float preTareWeight = loadCell.get_units(10);
-  // Serial.print("Load cell tared @ ");
-  // Serial.print(preTareWeight);
-  // Serial.println(" kg");
-  // loadCell.tare();
+  //loadCell.begin(loadCellDoutPin, loadCellSckPin);
+  //loadCell.set_scale(loadcellScale);
+  //float preTareWeight = loadCell.get_units(10);
+  //Serial.print("Load cell tared @ ");
+  //Serial.print(preTareWeight);
+  //Serial.println(" kg");
+  //loadCell.tare();
 
   // encoder setup
-  pinMode(travelEncoderPowerPin, OUTPUT);
-  digitalWrite(travelEncoderPowerPin, 1);
+  pinMode(encoderPowerPin, OUTPUT);
+  digitalWrite(encoderPowerPin, 1);
+  delay(250);
   travelEncoder.begin();
-  while (!travelEncoder.isConnected()) {
+  liftEncoder.begin();
+  while (!travelEncoder.isConnected() || !liftEncoder.isConnected()) {
+    #ifdef DEBUG
     Serial.println("failed to connect to AS5600, power cycling");
-    digitalWrite(travelEncoderPowerPin, 0);
+    #endif // DEBUG
+    digitalWrite(encoderPowerPin, 0);
     delay(250);
-    digitalWrite(travelEncoderPowerPin, 1);
+    digitalWrite(encoderPowerPin, 1);
     delay(250);
     travelEncoder.begin();
+    liftEncoder.begin();
   }
 
   // PID setup
   travelVelocityPID.SetOutputLimits(0, PID_OUTPUT_LIMIT);
   travelVelocityPID.Start(0, 0, 30 * HZ_TO_DPS);
   
-  pinMode(joystickXPin, INPUT);
-  pinMode(endstopPin, INPUT);
+  pinMode(endstopPin, INPUT_PULLUP);
   pinMode(LED_BUILTIN, OUTPUT);
+
+  Serial.println("BEGIN");
+  Serial.println("\"time (ms)\", \"filtered velocity (deg/s)\", \"travel power (%)\", \"load angle ADC\"");
 }
 
 // motor sweep values
@@ -88,8 +110,17 @@ const int minValue = -100;
 const int maxValue = 100;
 
 // travel velocity reporting
-constexpr int TRAVEL_VELOCITY_REPORT_PERIOD = 100; // ms
-uint32_t lastTravelVelocityReportTime = 0;
+constexpr int TRAVEL_VELOCITY_REPORT_PERIOD = 2; // ms
+uint32_t lastTravelVelocityReportTime = -99999;
+
+inline float stickToPower(int joystickVal, float deadzone)
+{
+  float power = (float)joystickVal / (1023/2) - 1;
+  if (abs(power) < deadzone) {
+    power = 0;
+  }
+  return power;
+}
 
 void loop() {
   // ===== MOTOR SWEEP =====
@@ -118,21 +149,46 @@ void loop() {
   // Serial.println(weight);
 
   // ===== TRAVEL ENCODER =====
-  travelVelocityFilter.input(travelEncoder.getAngularSpeed());
+  travelVelocityFilter.input(-travelEncoder.getAngularSpeed());
 
   // ===== TRAVEL VELOCITY PID =====
-  const double travelPower = travelVelocityPID.Run(travelVelocityFilter.Y) / PID_OUTPUT_LIMIT;
-  victor.setPower(travelPower);
+  //const double travelPower = travelVelocityPID.Run(travelVelocityFilter.Y) / PID_OUTPUT_LIMIT;
+  //victor.setPower(travelPower);
 
-  if (millis() - lastTravelVelocityReportTime > TRAVEL_VELOCITY_REPORT_PERIOD) {
+  // ===== STEP INPUT CONTROL =====
+  //int joystickVal = analogRead(joystickXPin);
+  //float travelPower = 0;
+  //if (joystickVal > 1000) {
+  //  travelPower = 0.25;
+  //} else if (joystickVal < 10) {
+  //  travelPower = -0.25;
+  //}
+  //travelMotor.setPower(travelPower);
+  
+  // ===== GENERAL JOYSTICK CONTROL =====
+  int joystickXVal = analogRead(joystickXPin);
+  int joystickYVal = analogRead(joystickYPin);
+  joystickXFilter.input(stickToPower(joystickXVal, 0) / 4);
+  joystickYFilter.input(-stickToPower(joystickYVal, 0.01));
+  travelMotor.setPower(joystickXFilter.Y);
+  liftMotor.setPower(joystickYFilter.Y);
+
+  uint32_t now = millis();
+  if (now - lastTravelVelocityReportTime > TRAVEL_VELOCITY_REPORT_PERIOD) {
     if (!travelEncoder.isConnected()) {
+      #ifdef DEBUG
       Serial.println("lost connection to AS5600");
+      #endif // DEBUG
+      Serial.print(9999);
+      Serial.print(", ");
+      Serial.print(9999);
+      Serial.println();
     } else {
-      Serial.print(travelVelocityFilter.Y);
-      Serial.print("\t\t");
-      Serial.print(travelVelocityPID.GetSetpoint());
-      Serial.print("\t\t");
-      Serial.print(travelPower);
+      Serial.print(now);
+      Serial.print(",");
+      Serial.print(joystickXVal);
+      Serial.print(",");
+      Serial.print(joystickYVal);
       Serial.println();
     }
 
