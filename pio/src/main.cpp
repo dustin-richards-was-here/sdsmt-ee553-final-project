@@ -19,8 +19,8 @@ constexpr int liftMotorPin = 12;
 constexpr int loadAnglePotPin = A3;
 
 // device objects
-Victor travelMotor(travelMotorPin);
-Victor liftMotor(liftMotorPin);
+Victor travelMotor(travelMotorPin, 1);
+Victor liftMotor(liftMotorPin, 0);
 HX711 loadCell;
 TwoWire *travelEncoderI2C = &Wire;
 TwoWire *liftEncoderI2C = &Wire1;
@@ -42,22 +42,43 @@ constexpr float TRAVEL_VELOCITY_MAX_HZ = 100;
 constexpr float TRAVEL_VELOCITY_MAX_DPS = TRAVEL_VELOCITY_MAX_HZ * HZ_TO_DPS;
 // because the PID class outputs an integer typecast to a float??
 constexpr int PID_OUTPUT_LIMIT = 1023;
-
-// filtering for encoder velocity esimation
-constexpr int velocityFilterCutoffFreq = 100; // Hz, I think
-FilterOnePole travelVelocityFilter(LOWPASS, velocityFilterCutoffFreq);
+// diameter of travel pulley in mm
+constexpr float TRAVEL_PULLEY_DIAMETER = 22.3;
+// distance carriage travels for each revolution of the pulley, mm
+constexpr float TRAVEL_MM_PER_REV = PI * TRAVEL_PULLEY_DIAMETER;
 
 // filtering for joystick inputs
-constexpr int joystickFilterCutoffFreq = 10;
-FilterOnePole joystickXFilter(LOWPASS, joystickFilterCutoffFreq);
-FilterOnePole joystickYFilter(LOWPASS, joystickFilterCutoffFreq);
+constexpr int joystickXFilterCutoffFreq = 1;
+constexpr int joystickYFilterCutoffFreq = 10;
+FilterOnePole joystickXFilter(LOWPASS, joystickXFilterCutoffFreq);
+FilterOnePole joystickYFilter(LOWPASS, joystickYFilterCutoffFreq);
 
-// PID setup
-//double KpTravelVelocity = 0.00005;
-double KpTravelVelocity = 0.03;
-double KiTravelVelocity = 0.03;
+// travel controller setup
+double KpTravelVelocity = 0.5;
+double KiTravelVelocity = 1;
 double KdTravelVelocity = 0;
+double KpTravelPosition = 2;
+double KiTravelPosition = 2;
+double KdTravelPosition = 0;
 PID_v2 travelVelocityPID(KpTravelVelocity, KiTravelVelocity, KdTravelVelocity, PID::Direct);
+PID_v2 travelPositionPID(KpTravelPosition, KiTravelPosition, KdTravelPosition, PID::Direct);
+
+// zero the travel axis
+void zeroTravel()
+{
+  travelVelocityPID.Setpoint(-100);
+
+  while (digitalRead(endstopPin)) {
+    float travelVelocity = -travelEncoder.getAngularSpeed() / 360 * TRAVEL_MM_PER_REV;
+    const double travelPower = constrain(travelVelocityPID.Run(travelVelocity) / PID_OUTPUT_LIMIT, -0.25, 0.25);
+    travelMotor.setPower(travelPower);
+  }
+
+  travelMotor.setPower(0);
+  travelVelocityPID.Setpoint(0);
+
+  travelEncoder.resetCumulativePosition();
+}
 
 void setup() {
   travelMotor.init();
@@ -91,26 +112,27 @@ void setup() {
     travelEncoder.begin();
     liftEncoder.begin();
   }
+  travelEncoder.resetCumulativePosition();
 
   // PID setup
-  travelVelocityPID.SetOutputLimits(0, PID_OUTPUT_LIMIT);
-  travelVelocityPID.Start(0, 0, 30 * HZ_TO_DPS);
+  travelVelocityPID.SetOutputLimits(-PID_OUTPUT_LIMIT, PID_OUTPUT_LIMIT);
+  travelVelocityPID.SetSampleTime(10);
+  travelVelocityPID.Start(0, 0, 0);
+  travelPositionPID.SetOutputLimits(-PID_OUTPUT_LIMIT, PID_OUTPUT_LIMIT);
+  travelPositionPID.SetSampleTime(10);
+  travelPositionPID.Start(0, 0, 0);
   
   pinMode(endstopPin, INPUT_PULLUP);
   pinMode(LED_BUILTIN, OUTPUT);
+
+  zeroTravel();
 
   Serial.println("BEGIN");
   Serial.println("\"time (ms)\", \"filtered velocity (deg/s)\", \"travel power (%)\", \"load angle ADC\"");
 }
 
-// motor sweep values
-int value = 0;
-int increment = 1;
-const int minValue = -100;
-const int maxValue = 100;
-
-// travel velocity reporting
-constexpr int TRAVEL_VELOCITY_REPORT_PERIOD = 2; // ms
+// logging interval parameters
+constexpr int TRAVEL_VELOCITY_REPORT_PERIOD = 50; // ms
 uint32_t lastTravelVelocityReportTime = -99999;
 
 inline float stickToPower(int joystickVal, float deadzone)
@@ -123,37 +145,14 @@ inline float stickToPower(int joystickVal, float deadzone)
 }
 
 void loop() {
-  // ===== MOTOR SWEEP =====
-  // if (value >= maxValue || value <= minValue)
-  // {
-  //   increment *= -1;
-  //   delay(5000);
-  // }
-  //
-  // value += increment;
-  //
-  // delay(100);
-
-  // ===== MOTOR W/ JOYSTICK =====
-  // int joystickXValue = analogRead(joystickXPin);
-  // float value = (float(joystickXValue) / 1023 * 200) - 100;
-
-  // victor.setPower(value);
-
-  // // ===== INDUCTIVE ENDSTOP =====
-  // int endstopValue = digitalRead(endstopPin);
-  // digitalWrite(LED_BUILTIN, !endstopValue);
-
   // ===== LOAD CELL =====
   // float weight = loadCell.get_units(10);
   // Serial.println(weight);
 
   // ===== TRAVEL ENCODER =====
-  travelVelocityFilter.input(-travelEncoder.getAngularSpeed());
-
-  // ===== TRAVEL VELOCITY PID =====
-  //const double travelPower = travelVelocityPID.Run(travelVelocityFilter.Y) / PID_OUTPUT_LIMIT;
-  //victor.setPower(travelPower);
+  // input mm/s into the filter
+  float travelVelocity = -travelEncoder.getAngularSpeed() / 360 * TRAVEL_MM_PER_REV;
+  float travelPosition = -(float)travelEncoder.getCumulativePosition() / 4096 * TRAVEL_MM_PER_REV;
 
   // ===== STEP INPUT CONTROL =====
   //int joystickVal = analogRead(joystickXPin);
@@ -168,9 +167,11 @@ void loop() {
   // ===== GENERAL JOYSTICK CONTROL =====
   int joystickXVal = analogRead(joystickXPin);
   int joystickYVal = analogRead(joystickYPin);
-  joystickXFilter.input(stickToPower(joystickXVal, 0) / 4);
-  joystickYFilter.input(-stickToPower(joystickYVal, 0.01));
-  travelMotor.setPower(joystickXFilter.Y);
+  joystickXFilter.input(stickToPower(joystickXVal, 0.05));
+  joystickYFilter.input(-stickToPower(joystickYVal, 0.05));
+  travelPositionPID.Setpoint(-joystickXFilter.Y * 500 + 500);
+  const double travelPower = constrain(travelPositionPID.Run(travelPosition) / PID_OUTPUT_LIMIT, -0.25, 0.25);
+  travelMotor.setPower(travelPower);
   liftMotor.setPower(joystickYFilter.Y);
 
   uint32_t now = millis();
@@ -186,9 +187,11 @@ void loop() {
     } else {
       Serial.print(now);
       Serial.print(",");
-      Serial.print(joystickXVal);
+      Serial.print(travelPower, 6);
       Serial.print(",");
-      Serial.print(joystickYVal);
+      Serial.print(travelPosition);
+      Serial.print(",");
+      Serial.print(joystickXFilter.Y);
       Serial.println();
     }
 

@@ -6,7 +6,7 @@
 class Victor
 {
 public:
-  Victor(int pin);
+  Victor(int _pin, bool reverse);
   void init();
   void setPower(float power);
 
@@ -16,6 +16,7 @@ public:
 
 private:
   int pin;
+  int reverse;
   Servo servo;
 };
 
