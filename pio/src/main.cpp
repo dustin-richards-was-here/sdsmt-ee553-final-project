@@ -46,6 +46,8 @@ constexpr int PID_OUTPUT_LIMIT = 1023;
 constexpr float TRAVEL_PULLEY_DIAMETER = 22.3;
 // distance carriage travels for each revolution of the pulley, mm
 constexpr float TRAVEL_MM_PER_REV = PI * TRAVEL_PULLEY_DIAMETER;
+// convert an ADC reading to an angle in radians
+constexpr float ADC_TO_RADIANS(int adc) {return 0.00507 * (adc-452);}
 
 // filtering for joystick inputs
 constexpr int joystickXFilterCutoffFreq = 1;
@@ -57,12 +59,23 @@ FilterOnePole joystickYFilter(LOWPASS, joystickYFilterCutoffFreq);
 double KpTravelVelocity = 0.5;
 double KiTravelVelocity = 1;
 double KdTravelVelocity = 0;
-double KpTravelPosition = 2;
-double KiTravelPosition = 2;
+double KpTravelPosition = 3;
+double KiTravelPosition = 1;
 double KdTravelPosition = 0;
 PID_v2 travelVelocityPID(KpTravelVelocity, KiTravelVelocity, KdTravelVelocity, PID::Direct);
 PID_v2 travelPositionPID(KpTravelPosition, KiTravelPosition, KdTravelPosition, PID::Direct);
 
+// swing controller setup
+double KpSwing = 50;
+double KiSwing = 0;
+double KdSwing = 2;
+PID_v2 swingPID(KpSwing, KiSwing, KdSwing, PID::Direct);
+
+// balances the contribution of the travel position and swing control loops
+// higher -> more travel position
+//float alpha = 0.08;
+float alpha = 0.08;
+  
 // zero the travel axis
 void zeroTravel()
 {
@@ -121,6 +134,9 @@ void setup() {
   travelPositionPID.SetOutputLimits(-PID_OUTPUT_LIMIT, PID_OUTPUT_LIMIT);
   travelPositionPID.SetSampleTime(10);
   travelPositionPID.Start(0, 0, 0);
+  swingPID.SetOutputLimits(-PID_OUTPUT_LIMIT, PID_OUTPUT_LIMIT);
+  swingPID.SetSampleTime(10);
+  swingPID.Start(0, 0, 0);
   
   pinMode(endstopPin, INPUT_PULLUP);
   pinMode(LED_BUILTIN, OUTPUT);
@@ -169,10 +185,18 @@ void loop() {
   int joystickYVal = analogRead(joystickYPin);
   joystickXFilter.input(stickToPower(joystickXVal, 0.05));
   joystickYFilter.input(-stickToPower(joystickYVal, 0.05));
-  travelPositionPID.Setpoint(-joystickXFilter.Y * 500 + 500);
-  const double travelPower = constrain(travelPositionPID.Run(travelPosition) / PID_OUTPUT_LIMIT, -0.25, 0.25);
-  travelMotor.setPower(travelPower);
+  travelPositionPID.Setpoint(-joystickXFilter.Y * 450 + 600);
+  //travelPositionPID.Setpoint(-joystickXFilter.Y * 500);
+  const double travelPowerStick = travelPositionPID.Run(travelPosition) / PID_OUTPUT_LIMIT;
   liftMotor.setPower(joystickYFilter.Y);
+
+  // ===== SWING ANGLE CONTROLLER =====
+  const float swingAngle = ADC_TO_RADIANS(analogRead(loadAnglePotPin));
+  const double travelPowerSwing = swingPID.Run(swingAngle) / PID_OUTPUT_LIMIT;
+
+  // ===== OUTPUT TO TRAVEL MOTOR =====
+  float travelPower = ((travelPowerStick * alpha) + (travelPowerSwing * (1-alpha))) * 2;
+  travelMotor.setPower(constrain(travelPower, -0.25, 0.25));
 
   uint32_t now = millis();
   if (now - lastTravelVelocityReportTime > TRAVEL_VELOCITY_REPORT_PERIOD) {
@@ -185,14 +209,15 @@ void loop() {
       Serial.print(9999);
       Serial.println();
     } else {
-      Serial.print(now);
-      Serial.print(",");
-      Serial.print(travelPower, 6);
-      Serial.print(",");
-      Serial.print(travelPosition);
-      Serial.print(",");
-      Serial.print(joystickXFilter.Y);
-      Serial.println();
+      //Serial.print(now);
+      //Serial.print(",");
+      //Serial.println(swingAngle);
+      //Serial.print(travelPowerStick);
+      //Serial.print(",");
+      //Serial.print(travelPowerSwing);
+      //Serial.print(",");
+      //Serial.print(travelPosition);
+      //Serial.println();
     }
 
     lastTravelVelocityReportTime = millis();
